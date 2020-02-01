@@ -7,6 +7,8 @@ from collections import OrderedDict
 import numpy as np
 import threading
 import collections
+from itertools import combinations
+from bisect import bisect_left
 
 import rlcard
 
@@ -225,6 +227,444 @@ def encode_cards(plane, cards):
         plane[layer][rank] = 1
         plane[0][rank] = 0
 
+class DoudizhuRule(object):
+    ''' Rule based playable cards generator '''
+
+    def __init__(self, hand_cards):
+        self.hand_cards = hand_cards
+        self.cards_dict = collections.defaultdict(int)
+        for card in hand_cards:
+            self.cards_dict[card] += 1
+        self.cards_count = np.array([self.cards_dict[k] for k in CARD_RANK_STR])
+        self.non_zero_index = None
+        self.more_than_1_index = None
+        self.more_than_2_index = None
+        self.more_than_3_index = None
+        self.solo_chain_indexs = None
+        self.pair_chain_indexs = None
+        self.trio_chain_indexs = None        
+
+    def chain_indexes(self, indexes_list):
+        ''' Find chains for solos, pairs and trios by using indexes_list
+
+        Args:
+            indexes_list: the indexes of cards those have the same count, the count could be 1, 2, or 3.
+
+        Returns: 
+            list of tuples: [(start_index1, length1), (start_index1, length1), ...]
+
+        '''
+        chains = []
+        prev_index = -100
+        count = 0
+        start = None
+        for i in indexes_list:
+            if (i[0] >= 12): #no chains for '2BR'
+                break
+            if (i[0] == prev_index + 1):
+                count += 1
+            else:
+                if (count > 1):
+                    chains.append((start, count))
+                count = 1
+                start = i[0]
+            prev_index = i[0]
+        if (count > 1):
+            chains.append((start, count))
+        return chains
+
+    def solo_attachments(self, chain_start, chain_length, size):
+        ''' Find solo attachments for trio_chain_solo_x and four_two_solo
+
+        Args:
+            chain_start: the index of start card of the trio_chain or trio or four
+            chain_length: the size of the sequence of the chain, 1 for trio_solo or four_two_solo
+            size: count of solos for the attachments
+
+        Returns: 
+            list of tuples: [attachment1, attachment2, ...]
+                            Each attachment has two elemnts, 
+                            the first one contains indexes of attached cards smaller than the index of chain_start,
+                            the first one contains indexes of attached cards larger than the index of chain_start
+        '''
+        attachments = set()
+        candidates = []
+        prev_card = None
+        same_card_count = 0
+        for card in self.hand_cards:
+            #dont count those cards in the chain
+            if (CARD_RANK_STR_INDEX[card] >= chain_start and CARD_RANK_STR_INDEX[card] < chain_start + chain_length):
+                continue
+            if (card == prev_card):
+                #attachments can not have bomb
+                if (same_card_count == 3):
+                    continue
+                #attachments can not have 3 same cards consecutive with the trio (except 3 cards of '222')
+                elif (same_card_count == 2 and (CARD_RANK_STR_INDEX[card] == chain_start - 1 or CARD_RANK_STR_INDEX[card] == chain_start + chain_length) and card != '2'):
+                    continue
+                else:
+                    same_card_count += 1
+            else:
+                prev_card = card
+                same_card_count = 1
+            candidates.append(CARD_RANK_STR_INDEX[card])
+        for attachment in combinations(candidates, size):
+            if (attachment[-1] == 14 and attachment[-2] == 13):
+                continue
+            i = bisect_left(attachment, chain_start)
+            attachments.add((attachment[:i], attachment[i:]))
+        return list(attachments)
+
+    def pair_attachments(self, chain_start, chain_length, size):
+        ''' Find pair attachments for trio_chain_pair_x and four_two_pair
+
+        Args:
+            chain_start: the index of start card of the trio_chain or trio or four
+            chain_length: the size of the sequence of the chain, 1 for trio_pair or four_two_pair
+            size: count of pairs for the attachments
+
+        Returns: 
+            list of tuples: [attachment1, attachment2, ...]
+                            Each attachment has two elemnts, 
+                            the first one contains indexes of attached cards smaller than the index of chain_start,
+                            the first one contains indexes of attached cards larger than the index of chain_start
+        '''
+        attachments = set()
+        candidates = []
+        for i in range(len(self.cards_count)):
+            if (i >= chain_start and i < chain_start + chain_length):
+                continue
+            if (self.cards_count[i] == 2 or self.cards_count[i] == 3):
+                candidates.append(i)
+            elif (self.cards_count[i] == 4):
+                candidates.append(i)
+        for attachment in combinations(candidates, size):
+            if (attachment[-1] == 14 and attachment[-2] == 13):
+                continue
+            i = bisect_left(attachment, chain_start)
+            attachments.add((attachment[:i], attachment[i:]))
+        return list(attachments)
+
+    def get_non_zero_index(self):
+        if (self.non_zero_index is None):
+            self.non_zero_indexe = np.argwhere(self.cards_count > 0)
+        return self.non_zero_indexe
+
+    def get_more_than_1_index(self):
+        if (self.more_than_1_index is None):
+            self.more_than_1_index = np.argwhere(self.cards_count > 1)
+        return self.more_than_1_index
+
+    def get_more_than_2_index(self):
+        if (self.more_than_2_index is None):
+            self.more_than_2_index = np.argwhere(self.cards_count > 2)
+        return self.more_than_2_index
+
+    def get_more_than_3_index(self):
+        if (self.more_than_3_index is None):
+            self.more_than_3_index = np.argwhere(self.cards_count > 3)
+        return self.more_than_3_index
+
+    def get_solo_chain_indexes(self):
+        if (self.solo_chain_indexs is None):
+            self.solo_chain_indexs = self.chain_indexes(self.get_non_zero_index())
+        return self.solo_chain_indexs
+
+    def get_pair_chain_indexes(self):
+        if (self.pair_chain_indexs is None):
+            self.pair_chain_indexs = self.chain_indexes(self.get_more_than_1_index())
+        return self.pair_chain_indexs
+
+    def get_trio_chain_indexes(self):
+        if (self.trio_chain_indexs is None):
+            self.trio_chain_indexs = self.chain_indexes(self.get_more_than_2_index())
+        return self.trio_chain_indexs
+
+    def get_solo(self):
+        return set([CARD_RANK_STR[i[0]] for i in self.get_non_zero_index()])
+
+    def get_pair(self):
+        return set([CARD_RANK_STR[i[0]] * 2 for i in self.get_more_than_1_index()])
+
+    def get_bomb(self):
+        return set([CARD_RANK_STR[i[0]] * 4 for i in self.get_more_than_3_index()])
+
+    def get_four_two_solo(self):
+        playable_cards = set()
+        for i in self.get_more_than_3_index():
+            for left, right in self.solo_attachments(i[0], 1, 2):
+                pre_attached = ''
+                for j in left:
+                    pre_attached += CARD_RANK_STR[j]
+                post_attached = ''
+                for j in right:
+                    post_attached += CARD_RANK_STR[j]
+                playable_cards.add(pre_attached + CARD_RANK_STR[i[0]] * 4 + post_attached)
+        return playable_cards
+
+    def get_four_two_pair(self):
+        playable_cards = set()
+        for i in self.get_more_than_3_index():
+            for left, right in self.pair_attachments(i[0], 1, 2):
+                pre_attached = ''
+                for j in left:
+                    pre_attached += CARD_RANK_STR[j] * 2
+                post_attached = ''
+                for j in right:
+                    post_attached += CARD_RANK_STR[j] * 2
+                playable_cards.add(pre_attached + CARD_RANK_STR[i[0]] * 4 + post_attached)
+        return playable_cards
+
+    def get_solo_chain_n(self, n):
+        if (n < 5 or n > 12):
+            return set()
+        playable_cards = set()
+        for (start_index, length) in self.get_solo_chain_indexes():
+            s, l = start_index, length
+            while(l >= n):
+                cards = ''
+                for i in range(n):
+                    cards += CARD_RANK_STR[s + i]
+                playable_cards.add(cards)
+                l -= 1
+                s += 1
+        return playable_cards
+
+    def get_pair_chain_n(self, n):
+        if (n < 3 or n > 10):
+            return set()
+        playable_cards = set()
+        for (start_index, length) in self.get_pair_chain_indexes():
+            s, l = start_index, length
+            while(l >= n):
+                cards = ''
+                for i in range(n):
+                    cards += CARD_RANK_STR[s + i] * 2
+                playable_cards.add(cards)
+                l -= 1
+                s += 1
+        return playable_cards
+
+    def get_trio(self):
+        return set([CARD_RANK_STR[i[0]] * 3 for i in self.get_more_than_2_index()])
+
+    def get_trio_solo(self):
+        playable_cards = set()
+        for i in self.get_more_than_2_index():
+            for j in self.get_non_zero_index():
+                if (j < i):
+                    playable_cards.add(CARD_RANK_STR[j[0]] + CARD_RANK_STR[i[0]] * 3)
+                elif (j > i):
+                    playable_cards.add(CARD_RANK_STR[i[0]] * 3 + CARD_RANK_STR[j[0]])
+        return playable_cards
+
+    def get_trio_pair(self):
+        playable_cards = set()
+        for i in self.get_more_than_2_index():
+            for j in self.get_more_than_1_index():
+                if (j < i):
+                    playable_cards.add(CARD_RANK_STR[j[0]] * 2 + CARD_RANK_STR[i[0]] * 3)
+                elif (j > i):
+                    playable_cards.add(CARD_RANK_STR[i[0]] * 3 + CARD_RANK_STR[j[0]] * 2)
+        return playable_cards
+
+    def get_trio_chain_n(self, n):
+        if (n < 2 or n > 6):
+            return set()
+        playable_cards = set()
+        for (start_index, length) in self.get_trio_chain_indexes():
+            s, l = start_index, length
+            while(l >= n):
+                cards = ''
+                for i in range(n):
+                    cards += CARD_RANK_STR[s + i] * 3
+                playable_cards.add(cards)
+                l -= 1
+                s += 1
+        return playable_cards
+
+    def get_trio_solo_chain_n(self, n):
+        if (n < 2 or n > 5):
+            return set()
+        playable_cards = set()
+        for (start_index, length) in self.get_trio_chain_indexes():
+            s, l = start_index, length
+            while(l >= n):
+                cards = ''
+                for i in range(n):
+                    cards += CARD_RANK_STR[s + i] * 3
+                for left, right in self.solo_attachments(s, n, n):
+                        pre_attached = ''
+                        for j in left:
+                            pre_attached += CARD_RANK_STR[j]
+                        post_attached = ''
+                        for j in right:
+                            post_attached += CARD_RANK_STR[j]
+                        playable_cards.add(pre_attached + cards + post_attached)
+                playable_cards.add(cards)
+                l -= 1
+                s += 1
+        return playable_cards
+
+    def get_trio_pair_chain_n(self, n):
+        if (n < 2 or n > 4):
+            return set()
+        playable_cards = set()
+        for (start_index, length) in self.get_trio_chain_indexes():
+            s, l = start_index, length
+            while(l >= n):
+                cards = ''
+                for i in range(n):
+                    cards += CARD_RANK_STR[s + i] * 3
+                for left, right in self.pair_attachments(s, n, n):
+                        pre_attached = ''
+                        for j in left:
+                            pre_attached += CARD_RANK_STR[j] * 2
+                        post_attached = ''
+                        for j in right:
+                            post_attached += CARD_RANK_STR[j] * 2
+                        playable_cards.add(pre_attached + cards + post_attached)
+                playable_cards.add(cards)
+                l -= 1
+                s += 1
+        return playable_cards
+        
+    def get_rocket(self):
+        if (self.cards_count[13] and self.cards_count[14]):
+            return set([CARD_RANK_STR[13] + CARD_RANK_STR[14]])
+        else:
+            return set()
+
+    def playable_cards(self, card_type = None):
+        ''' Get playable cards from self.hand_cards for card_type.
+
+        Args:
+            card_type: which type of playable cards to generate. None for all types of playable cards. 
+
+        Returns:
+            set: set of string of playable cards
+        '''
+        # for all types
+        if (not card_type):
+            playable_cards = set()
+            playable_cards.update(self.get_solo())
+            playable_cards.update(self.get_pair())
+            playable_cards.update(self.get_trio())
+            playable_cards.update(self.get_trio_solo())
+            playable_cards.update(self.get_trio_pair())
+            playable_cards.update(self.get_four_two_solo())
+            playable_cards.update(self.get_four_two_pair())
+            playable_cards.update(self.get_bomb())
+            playable_cards.update(self.get_rocket())
+            #solo_chain_5 -- #solo_chain_12     
+            for (start_index, length) in self.get_solo_chain_indexes():
+                s, l = start_index, length
+                while(l >= 5):
+                    cards = ''
+                    curr_index = s - 1
+                    curr_length = 0
+                    while (curr_length < l and curr_length < 12):
+                        curr_index += 1
+                        curr_length += 1
+                        cards += CARD_RANK_STR[curr_index]
+                        if (curr_length >= 5):
+                            playable_cards.add(cards)
+                    l -= 1
+                    s += 1
+            #pair_chain_3 -- #pair_chain_10
+            for (start_index, length) in self.get_pair_chain_indexes():
+                s, l = start_index, length
+                while(l >= 3):
+                    cards = ''
+                    curr_index = s - 1
+                    curr_length = 0
+                    while (curr_length < l and curr_length < 10):
+                        curr_index += 1
+                        curr_length += 1
+                        cards += CARD_RANK_STR[curr_index] * 2
+                        if (curr_length >= 3):
+                            playable_cards.add(cards)
+                    l -= 1
+                    s += 1
+            #trio_chain_2 -- trio_chain_6; trio_solo_chain_2 -- trio_solo_chain_5; trio_pair_chain_2 -- trio_pair_chain_4
+            for (start_index, length) in self.get_trio_chain_indexes():
+                s, l = start_index, length
+                while(l >= 2):
+                    cards = ''
+                    curr_index = s - 1
+                    curr_length = 0
+                    while (curr_length < l and curr_length < 6):
+                        curr_index += 1
+                        curr_length += 1
+                        cards += CARD_RANK_STR[curr_index] * 3
+
+                        #trio_chain_2 to trio_chain_6
+                        if (curr_length >= 2 and curr_length <= 6):
+                            playable_cards.add(cards)
+                        
+                        #trio_solo_chain_2 to trio_solo_chain_5
+                        if (curr_length >= 2 and curr_length <= 5):
+                            for left, right in self.solo_attachments(s, curr_length, curr_length):
+                                pre_attached = ''
+                                for j in left:
+                                    pre_attached += CARD_RANK_STR[j]
+                                post_attached = ''
+                                for j in right:
+                                    post_attached += CARD_RANK_STR[j]
+                                playable_cards.add(pre_attached + cards + post_attached)
+                        
+                        #trio_pair_chain2 -- trio_pair_chain_4
+                        if (curr_length >= 2 and curr_length <= 4):
+                            for left, right in self.pair_attachments(s, curr_length, curr_length):
+                                pre_attached = ''
+                                for j in left:
+                                    pre_attached += CARD_RANK_STR[j] * 2
+                                post_attached = ''
+                                for j in right:
+                                    post_attached += CARD_RANK_STR[j] * 2
+                                playable_cards.add(pre_attached + cards + post_attached)
+                    l -= 1
+                    s += 1
+            return playable_cards
+        elif (card_type == 'solo'):
+            return self.get_solo()
+        elif (card_type[:11] == 'solo_chain_'):
+            n = int(card_type[-1])
+            if (n < 5):
+                n = int(card_type[-2:])
+            return self.get_solo_chain_n(n)
+        elif (card_type == 'pair'):
+            return self.get_pair()
+        elif (card_type[:11] == 'pair_chain_'):
+            n = int(card_type[-1])
+            if (n < 3):
+                n = int(card_type[-2:])
+            return self.get_pair_chain_n(n)
+        elif (card_type == 'trio'):
+            return self.get_trio()
+        elif (card_type[:11] == 'trio_chain_'):
+            n = int(card_type[-1])
+            return self.get_trio_chain_n(n)
+        elif (card_type == 'trio_solo'):
+            return self.get_trio_solo()
+        elif (card_type[:16] == 'trio_solo_chain_'):
+            n = int(card_type[-1])
+            return self.get_trio_solo_chain_n(n)
+        elif (card_type == 'trio_pair'):
+            return self.get_trio_pair()
+        elif (card_type[:16] == 'trio_pair_chain_'):
+            n = int(card_type[-1])
+            return self.get_trio_pair_chain_n(n)
+        elif (card_type == 'four_two_solo'):
+            return self.get_four_two_solo()
+        elif (card_type == 'four_two_pair'):
+            return self.get_four_two_pair()
+        elif (card_type == 'bomb'):
+            return self.get_bomb()
+        elif (card_type == 'rocket'):
+            return self.get_rocket()
+        else:
+            return set()
 
 def get_gt_cards(player, greater_player):
     ''' Provide player's cards which are greater than the ones played by
@@ -255,14 +695,18 @@ def get_gt_cards(player, greater_player):
     if 'bomb' not in type_dict:
         type_dict['bomb'] = -1
     for card_type, weight in type_dict.items():
-        candidate = TYPE_CARD[card_type]
-        for can_weight, cards_list in candidate.items():
-            if int(can_weight) > int(weight):
-                for cards in cards_list:
-                    # TODO: improve efficiency
-                    if cards not in gt_cards and contains_cards(current_hand, cards):
-                        # if self.contains_cards(current_hand, cards):
-                        gt_cards.append(cards)
+        w = int(weight)
+        for candidate in DoudizhuRule(current_hand).playable_cards(card_type):
+            if (int(CARD_TYPE[0][candidate][0][1]) > w):
+                gt_cards.append(candidate)
+        # candidate = TYPE_CARD[card_type]
+        # for can_weight, cards_list in candidate.items():
+        #     if int(can_weight) > int(weight):
+        #         for cards in cards_list:
+        #             # TODO: improve efficiency
+        #             if cards not in gt_cards and contains_cards(current_hand, cards):
+        #                 # if self.contains_cards(current_hand, cards):
+        #                 gt_cards.append(cards)
     return gt_cards
 
 
